@@ -12,9 +12,12 @@ workflow sarsCoV2heatmap {
   }
 
   parameter_meta {
-    consensus_fasta: "a list of fasta files with consensus sequences of the reference,generated from different libraries"
-    reference_fasta: "fasta file with the reference sequence"
-    covariates: "a file with covariate information, in tabular format"
+    file_list: ""
+    fasta_files: "A list of fasta files with consensus sequences of the reference, generated from different libraries"
+    covariate_file: "A file with covariate information, in tabular format"
+    reference_fasta: "Fasta file with the reference sequence"
+    threshold: "Threshold for minimum coverage of reference genome"
+    rename: ""
   }
 
   meta {
@@ -23,14 +26,14 @@ workflow sarsCoV2heatmap {
     description: "Generate variant calls from consensus sequence, a tree of distances, and a plot showing relationships with covariate data"
     dependencies: [
       {
-        name: "ncov-tools/1",
-        url: ""
+        name: "ncov-tools/1.4",
+        url: "https://github.com/jts/ncov-tools/archive/v1.4.tar.gz"
       },
     ]
   }
 
   call preprocess_consensus {
-    input: threshold = threshold,fasta_files = fasta_files,rename = rename
+    input: threshold = threshold, fasta_files = fasta_files, rename = rename
   }
   
   call augur {
@@ -41,66 +44,64 @@ workflow sarsCoV2heatmap {
     input: ref = reference_fasta, aligned_fa = augur.aligned_fa
   }
   
-  call lineage {
-    input: fasta = preprocess_consensus.consensus_fa
-  }
-  
   call plot {
-    input: tree = augur.tree,variants=call_variants.alleles
+    input: tree = augur.tree, variants=call_variants.alleles
   }
 
 }
 
-
-task plot{
-  input{
-    File tree
-    File variants
-    String modules = "bis-rlibs ncov-tools/1"
+task preprocess_consensus {
+  input {
+    Float threshold
+    Array[File] fasta_files
+	  File rename
+    String modules = "phylomap-tools/0"
   }
-  
+
+  parameter_meta {
+      threshold: ""
+      fasta_files: ""
+      rename: ""
+  }
+
   command <<<
     set -euo pipefail
-    module purge
-    module load ~{modules}
-    script_R="/.mounts/labs/gsiprojects/gsi/lheisler/WDL/dev_cov2/scripts/plot_variant_tree.R"
-    Rscript --vanilla $script_R --tree ~{tree}  --variants ~{variants} --out variant_tree.pdf
+    preprocess_fasta  \
+    --threshold ~{threshold} \
+    --fasta ~{sep=' --fasta ' fasta_files} > consensus.fasta \
+    --stats "preprocess.stats.txt" \
+    --rename_tbl ~{rename}
   >>>
-  
-  
-  output{
-    File plot1 = "variant_tree.pdf"
-  }
+ 
+   output {
+     File consensus_fa = "consensus.fasta"
+   }
 }
 
-
-
-task lineage{
-
-  input{
+task augur {
+  input {
     File fasta
-    String modules = "ncov-tools/1"
+    File ref
+    String modules = "ncov-tools/1 phylomap-tools/0"
   }
 
   command <<<
     set -euo pipefail
-    module purge
-    module load ~{modules}  
-    pangolin -t 8 ~{fasta} -o .
-    cat lineage_report.csv | sed 's/taxon,/name,/' | cut -d "," -f 1,2 | sed 's/,/\t/' > lineage_covariate.tsv
+    augur align --sequences ~{fasta} --reference-sequence ~{ref} --output aligned.fasta --fill-gaps
+    augur tree --alignment aligned.fasta --output tree_raw.nwk
+    refid=$( head -n 1 ~{ref} | sed 's/>//' | sed 's/ .*//' )
+    nw_reroot tree_raw.nwk $refid > tree.nwk
   >>>
   
-  output{
-    File lineage_report = "lineage_report.csv"
-    File lineage_covariates = "lineage_covariate.tsv"
-
+  output {
+    File aligned_fa = "aligned.fasta"
+    File tree_raw = "tree_raw.nwk"
+    File tree = "tree.nwk"
   }
-
-
 }
 
-task call_variants{
-  input{
+task call_variants {
+  input {
     File ref
     File aligned_fa
     String modules = "ncov-tools/1"
@@ -108,67 +109,42 @@ task call_variants{
   
   command <<<
     set -euo pipefail
-    module purge
-    module load ~{modules}  
     refid=$( head -n 1 ~{ref} | sed 's/>//' | sed 's/ .*//' )
     python ${NCOV_TOOLS_ROOT}/tree/align2alleles.py --reference-name $refid ~{aligned_fa} > alleles.tsv
   >>>
   
-  output{
+  output {
     File alleles = "alleles.tsv"
-  
   }
   
 }
 
-
-task augur {
-  input{
-    File fasta
-    File ref
-    String modules = "ncov-tools/1"
+task plot {
+  input {
+    File tree
+    File variants
+    String modules = "bis-rlibs ncov-tools/1 phylomap-tools/0"
   }
-
+  
   command <<<
     set -euo pipefail
-    module purge
-    module load ~{modules}
-    augur align --sequences ~{fasta} --reference-sequence ~{ref} --output aligned.fasta --fill-gaps
-    augur tree --alignment aligned.fasta --output tree_raw.nwk
-    refid=$( head -n 1 ~{ref} | sed 's/>//' | sed 's/ .*//' )
-    nw_reroot tree_raw.nwk $refid > tree.nwk
+    script_R="/.mounts/labs/gsiprojects/gsi/lheisler/WDL/dev_cov2/scripts/plot_variant_tree.R"
+    Rscript --vanilla $script_R --tree ~{tree}  --variants ~{variants} --out variant_tree.pdf
   >>>
   
-  output{
-    File aligned_fa = "aligned.fasta"
-    File tree_raw = "tree_raw.nwk"
-    File tree = "tree.nwk"
+  
+  output {
+    File plot1 = "variant_tree.pdf"
   }
 }
 
 
 
 
-task preprocess_consensus {
-  input{
-    Float threshold
-    Array[File] fasta_files
-	File rename
-  }
 
-  command <<<
-    set -euo pipefail
-    /.mounts/labs/gsiprojects/gsi/lheisler/WDL/dev_cov2/scripts/preprocess_fasta.pl  \
-      --threshold ~{threshold} \
-      --fasta ~{sep=' --fasta ' fasta_files} > consensus.fasta \
-      --stats "preprocess.stats.txt" \
-      --rename_tbl ~{rename}
-    
-  >>>
- 
-   output{
-     File consensus_fa = "consensus.fasta"
-   }
-}
+
+
+
+
 
 
